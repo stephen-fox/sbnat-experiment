@@ -15,7 +15,7 @@ use ctor::ctor;
 use ipcapi::{ConnectRequest, Response, SocketRequest};
 use passfd::FdPassingExt;
 
-const SOCKET_PATH: &str = "/home/u/src/sbnat/foo.sock";
+const SOCKET_PATH: &str = "/sbnatd.sock";
 
 static LIBC: OnceLock<dlrkit::Dl> = OnceLock::new();
 
@@ -41,6 +41,15 @@ fn on_load_with_error() -> Result<(), Box<dyn Error>> {
     CONNECT.get_or_init(load_connect);
 
     Ok(())
+}
+
+fn connect_to_daemon() -> Result<UnixStream, Box<dyn Error>> {
+    let daemon_socket_path = match std::env::var("SBNAT_SOCKET_PATH") {
+        Ok(path_str) => PathBuf::from(path_str),
+        Err(_) => PathBuf::from(SOCKET_PATH),
+    };
+
+    connect_socket(&daemon_socket_path)
 }
 
 // Based on this example::
@@ -134,7 +143,7 @@ fn load_library() -> dlrkit::Dl {
 
 #[unsafe(no_mangle)]
 extern "C" fn socket(domain: c_int, socket_type: c_int, protocol: c_int) -> c_int {
-    let mut conn = match connect_socket(&PathBuf::from(SOCKET_PATH)) {
+    let mut conn = match connect_to_daemon() {
         Ok(conn) => conn,
         Err(_err) => {
             #[cfg(feature = "debug")]
@@ -200,7 +209,7 @@ extern "C" fn connect(
     sockaddr: *const ctypes::sockaddr,
     namelen: ctypes::socklen_t,
 ) -> c_int {
-    let mut conn = match connect_socket(&PathBuf::from(SOCKET_PATH)) {
+    let mut conn = match connect_to_daemon() {
         Ok(conn) => conn,
         Err(_err) => {
             #[cfg(feature = "debug")]
