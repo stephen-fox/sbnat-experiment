@@ -1,0 +1,3 @@
+[workspace]
+members = [ "ctypes","dlrkit", "ipcapi", "libsbnat" , "sbnatd"]
+resolver = "3"

@@ -1,0 +1,17 @@
+[package]
+name = "libsbnat"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+debug = []
+
+[dependencies]
+ctor = "0.6.0"
+ctypes = { version = "0.1.0", path = "../ctypes" }
+dlrkit = { version = "0.1.0", path = "../dlrkit" }
+ipcapi = { version = "0.1.0", path = "../ipcapi" }
+passfd = "0.1.6"
