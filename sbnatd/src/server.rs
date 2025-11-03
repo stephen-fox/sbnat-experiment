@@ -8,7 +8,10 @@ use std::{
     io::Write,
     os::{
         fd::{AsRawFd, RawFd},
-        unix::net::{SocketAddr, UnixListener, UnixStream},
+        unix::{
+            fs::PermissionsExt,
+            net::{SocketAddr, UnixListener, UnixStream},
+        },
     },
     path::PathBuf,
 };
@@ -41,9 +44,22 @@ impl Server {
     pub fn listen(config: Config) -> Result<Server, Box<dyn Error>> {
         let _ = fs::remove_file(&config.listen_path);
 
-        let listener = UnixListener::bind(&config.listen_path)?;
+        let listener = UnixListener::bind(&config.listen_path)
+            .map_err(|err| format!("failed to create unix socket - {err}"))?;
 
-        let cloned_listener = listener.try_clone()?;
+        let listener_perms = fs::metadata(&config.listen_path)
+            .map_err(|err| format!("failed to get unix socket permissions - {err}"))?;
+
+        let mut listener_perms = listener_perms.permissions();
+
+        listener_perms.set_mode(0o666);
+
+        fs::set_permissions(&config.listen_path, listener_perms)
+            .map_err(|err| format!("failed to update unix socket permissions - {err}"))?;
+
+        let cloned_listener = listener
+            .try_clone()
+            .map_err(|err| format!("failed to clone unix socket fd - {err}"))?;
 
         Ok(Self {
             config: config,
@@ -52,7 +68,10 @@ impl Server {
     }
 
     pub fn accept(&mut self) -> Result<Conn, Box<dyn Error>> {
-        let result = self.listener.accept()?;
+        let result = self
+            .listener
+            .accept()
+            .map_err(|err| format!("failed to accept new client connection - {err}"))?;
 
         Ok(Conn::new(result.0, result.1))
     }
