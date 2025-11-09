@@ -3,6 +3,9 @@ name = "sbnatd"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+debug = []
+
 [dependencies]
 argparse = { git = "https://github.com/stephen-fox/rust-argparse", version = "0.2.2" }
 ctypes = { version = "0.1.0", path = "../ctypes" }

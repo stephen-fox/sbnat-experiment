@@ -12,10 +12,10 @@ use std::{
 };
 
 use ctor::ctor;
-use ipcapi::{ConnectRequest, Response, SocketRequest};
+use ipcapi::{ConnectRequest, Response};
 use passfd::FdPassingExt;
 
-const SOCKET_PATH: &str = "/sbnatd.sock";
+const DEFAULT_DAEMON_SOCKET_PATH: &str = "/sbnatd.sock";
 
 static LIBC: OnceLock<dlrkit::Dl> = OnceLock::new();
 
@@ -46,15 +46,15 @@ fn on_load_with_error() -> Result<(), Box<dyn Error>> {
 fn connect_to_daemon() -> Result<UnixStream, Box<dyn Error>> {
     let daemon_socket_path = match std::env::var("SBNAT_SOCKET_PATH") {
         Ok(path_str) => PathBuf::from(path_str),
-        Err(_) => PathBuf::from(SOCKET_PATH),
+        Err(_) => PathBuf::from(DEFAULT_DAEMON_SOCKET_PATH),
     };
 
-    connect_socket(&daemon_socket_path)
+    dial_unix_socket(&daemon_socket_path)
 }
 
 // Based on this example::
 // https://docs-archive.freebsd.org/44doc/psd/20.ipctut/paper.pdf
-fn connect_socket(path: &Path) -> Result<UnixStream, Box<dyn Error>> {
+fn dial_unix_socket(path: &Path) -> Result<UnixStream, Box<dyn Error>> {
     let socket_fn = SOCKET.get_or_init(load_socket);
     let connect_fn = CONNECT.get_or_init(load_connect);
 
@@ -73,7 +73,8 @@ fn connect_socket(path: &Path) -> Result<UnixStream, Box<dyn Error>> {
     let result = connect_fn(socket_fd, (&raw const addr) as *const _, addr_len);
     if result == -1 {
         return Err(format!(
-            "connect function failed - {}",
+            "connect function failed for '{}' - {}",
+            path.to_str().unwrap_or("<to_str failed>"),
             std::io::Error::last_os_error()
         ))?;
     }
@@ -142,73 +143,33 @@ fn load_library() -> dlrkit::Dl {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn socket(domain: c_int, socket_type: c_int, protocol: c_int) -> c_int {
-    let mut conn = match connect_to_daemon() {
-        Ok(conn) => conn,
-        Err(_err) => {
-            #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] socket: failed to connect to daemon - {_err}");
-
-            return -1;
-        }
-    };
-
-    let req = SocketRequest {
-        domain: domain,
-        stype: socket_type,
-        protocol: protocol,
-    };
-
-    if let Err(_err) = conn.write_all(&req.bytes()) {
-        #[cfg(feature = "debug")]
-        eprintln!("[libsbnat] socket: failed to send request - {_err}");
-
-        return -1;
-    }
-
-    let resp = match Response::next(&conn) {
-        Ok(r) => r,
-        Err(_err) => {
-            #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] socket: failed to receive or parse reponse - {_err}");
-
-            return -1;
-        }
-    };
-
-    match resp {
-        Response::Success => {}
-        Response::FailureInt(i) => {
-            #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] socket: remote socket call failed with: {i}");
-
-            return i;
-        }
-        Response::Failure(_err) => {
-            #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] socket: remote socket call failed with err: {_err}");
-
-            return -1;
-        }
-    };
-
-    match conn.recv_fd() {
-        Ok(fd) => fd,
-        Err(_err) => {
-            #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] socket: failed to receive fd: {_err}");
-
-            -1
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
 extern "C" fn connect(
     socket_fd: c_int,
     sockaddr: *const ctypes::sockaddr,
     namelen: ctypes::socklen_t,
 ) -> c_int {
+    do_connect_request(socket_fd, sockaddr, namelen)
+}
+
+fn do_connect_request(
+    socket_fd: c_int,
+    sockaddr: *const ctypes::sockaddr,
+    _namelen: ctypes::socklen_t,
+) -> c_int {
+    let rust_sa_result = unsafe { ctypes::sockaddr::to_addr(sockaddr) };
+
+    let rust_sa = match rust_sa_result {
+        Ok(sa) => sa,
+        Err(_err) => {
+            #[cfg(feature = "debug")]
+            eprintln!(
+                "[libsbnat] connect: failed to convert sockaddr object to rust object - {_err}"
+            );
+
+            return -1;
+        }
+    };
+
     let mut conn = match connect_to_daemon() {
         Ok(conn) => conn,
         Err(_err) => {
@@ -219,11 +180,7 @@ extern "C" fn connect(
         }
     };
 
-    let req = ConnectRequest {
-        socket_fd: socket_fd,
-        name: unsafe { *sockaddr },
-        namelen: namelen,
-    };
+    let req = ConnectRequest { sa: rust_sa };
 
     if let Err(_err) = conn.write_all(&req.bytes()) {
         #[cfg(feature = "debug")]
@@ -243,25 +200,55 @@ extern "C" fn connect(
         Ok(r) => r,
         Err(_err) => {
             #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] connect: failed to receive or parse reponse - {_err}");
+            eprintln!("[libsbnat] connect: failed to receive or parse response - {_err}");
 
             return -1;
         }
     };
 
     match resp {
-        Response::Success => 0,
+        Response::Success => (),
         Response::FailureInt(i) => {
             #[cfg(feature = "debug")]
-            eprintln!("[libsbnat] connect: remote connect call failed with: {i}");
+            eprintln!(
+                "[libsbnat] connect: remote connect call failed with: {i} - {}",
+                std::io::Error::from_raw_os_error(i)
+            );
 
-            i
+            return i;
         }
         Response::Failure(_err) => {
             #[cfg(feature = "debug")]
             eprintln!("[libsbnat] connect: remote connect call failed with err: {_err}");
 
-            -1
+            return -1;
         }
+    };
+
+    let new_socket_fd = match conn.recv_fd() {
+        Ok(fd) => fd,
+        Err(_err) => {
+            #[cfg(feature = "debug")]
+            eprintln!("[libsbnat] connect: failed to receive new socket fd: {_err}");
+
+            return -1;
+        }
+    };
+
+    let result = unsafe { dup2(new_socket_fd, socket_fd) };
+    if result < 0 {
+        #[cfg(feature = "debug")]
+        eprintln!(
+            "[libsbnat] connect: failed to replace old socket fd with  new socket fd: {}",
+            std::io::Error::last_os_error()
+        );
+
+        return -1;
     }
+
+    0
+}
+
+unsafe extern "C" {
+    fn dup2(oldd: c_int, newd: c_int) -> c_int;
 }

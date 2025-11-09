@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_void};
 
 use std::{
     error::Error,
@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
 };
 
-use ipcapi::{ConnectRequest, Request, Response, SocketRequest};
+use ipcapi::{ConnectRequest, Request, Response};
 use passfd::FdPassingExt;
 
 pub struct Config {
@@ -135,73 +135,263 @@ impl Conn {
 
     pub fn handle_one_request(&mut self) -> Result<(), Box<dyn Error>> {
         match Request::next(&self.socket)? {
-            Request::Socket(r) => self.handle_socket_request(r),
-            Request::Connect(r) => self.handle_connect_request(r),
+            Request::Connect(r) => {
+                eprintln!("handle_connect_request start");
+                let result = self.handle_connect_request(r);
+                eprintln!("handle_connect_request end");
+                result
+            }
         }
     }
 
-    fn handle_socket_request(&mut self, r: SocketRequest) -> Result<(), Box<dyn Error>> {
-        let res = unsafe { socket(r.domain, r.stype, r.protocol) };
+    fn handle_connect_request(&mut self, req: ConnectRequest) -> Result<(), Box<dyn Error>> {
+        let socket_fd_from_client = self
+            .socket
+            .recv_fd()
+            .map_err(|err| format!("connect: failed to receive socket fd from client - {err}"))?;
 
-        if res < 0 {
-            // TODO: close socket.
+        let socket_info_result = get_socket_info(socket_fd_from_client);
+
+        unsafe { close(socket_fd_from_client) };
+
+        let socket_info = match socket_info_result {
+            Ok(info) => info,
+            Err(err) => {
+                self.socket
+                    .write_all(&Response::Failure(err.to_string()).bytes())
+                    .map_err(|err| {
+                        format!("connect: failed to write get_socket_info error to client - {err}")
+                    })?;
+
+                return Err(format!(
+                    "connect: failed to get info for client socket - {err}"
+                ))?;
+            }
+        };
+
+        #[cfg(feature = "debug")]
+        eprintln!(
+            "connect: socket info - domain: {} | type: {} | proto: {}",
+            socket_info.domain, socket_info.stype, socket_info.protocol
+        );
+
+        if socket_info.domain == ctypes::AF_UNIX {
+            self.socket
+                .write_all(&Response::FailureInt(-1).bytes())
+                .map_err(|err| {
+                    format!("connect: failed to write get_socket_info error to client - {err}")
+                })?;
+
+            return Err("connect: client sent a AF_UNIX socket")?;
+        }
+
+        // We need to override socket(2) because FreeBSD seems to know
+        // if a socket originated from a jail. Thus, the client needs
+        // the daemon to create the socket.
+        //
+        // For example, calling connect(2) with a socket fd created in
+        // a vnet jail will result in this error:
+        //
+        //   connect failed -1 - Network is unreachable (os error 51)
+        let new_socket_fd =
+            unsafe { socket(socket_info.domain, socket_info.stype, socket_info.protocol) };
+
+        if new_socket_fd < 0 {
+            let last_err_i = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
 
             self.socket
-                .write_all(&Response::FailureInt(res).bytes())
+                .write_all(&Response::FailureInt(last_err_i).bytes())
                 .map_err(|err| {
-                    format!("socket: failed to write socket result to client - {err}")
+                    format!("connect: failed to write socket error response to client - {err}")
                 })?;
 
             return Ok(());
         }
 
-        self.socket
-            .write_all(&Response::Success.bytes())
-            .map_err(|err| {
-                format!("socket: failed to write success response to client - {err} ")
-            })?;
+        let sockaddr_data = match req.sa {
+            std::net::SocketAddr::V4(v4) => {
+                let tmp = ctypes::sockaddr_in {
+                    sin_len: 0,
+                    sin_family: ctypes::AF_INET as u8,
+                    sin_port: req.sa.port(),
+                    sin_addr: ctypes::in_addr {
+                        s_addr: v4.ip().to_bits(),
+                    },
+                    sin_zero: [0u8; 8],
+                };
 
-        self.socket
-            .send_fd(res)
-            .map_err(|err| format!("socket: failed to send socket fd to client - {err} "))?;
+                (
+                    (&raw const tmp) as *const ctypes::sockaddr,
+                    std::mem::size_of::<ctypes::sockaddr_in>(),
+                )
+            }
+            std::net::SocketAddr::V6(v6) => {
+                let tmp = ctypes::sockaddr_in6 {
+                    sin6_len: 0,
+                    sin6_family: ctypes::AF_INET6 as u8,
+                    sin6_port: req.sa.port(),
+                    sin6_addr: ctypes::in6_addr {
+                        s6_addr: v6.ip().octets(),
+                    },
+                    sin6_flowinfo: v6.flowinfo(),
+                    sin6_scope_id: v6.scope_id(),
+                };
 
-        eprintln!("handle_socket_request done");
-
-        Ok(())
-    }
-
-    fn handle_connect_request(&mut self, r: ConnectRequest) -> Result<(), Box<dyn Error>> {
-        let socket = self
-            .socket
-            .recv_fd()
-            .map_err(|err| format!("connect: failed to receive socket fd from client - {err}"))?;
-
-        let res = unsafe { connect(socket, &r.name, r.namelen) };
-
-        if res == 0 {
-            self.socket
-                .write_all(&Response::Success.bytes())
-                .map_err(|err| {
-                    format!("connect: failed to write success response to client - {err}")
-                })?
-        } else {
-            self.socket
-                .write_all(&Response::FailureInt(res).bytes())
-                .map_err(|err| format!("failed to write error response to client - {err}"))?
+                (
+                    (&raw const tmp) as *const ctypes::sockaddr,
+                    std::mem::size_of::<ctypes::sockaddr_in6>(),
+                )
+            }
         };
 
-        eprintln!("handle_connect_request done");
+        let connect_result = unsafe {
+            connect(
+                new_socket_fd,
+                sockaddr_data.0,
+                sockaddr_data.1 as ctypes::socklen_t,
+            )
+        };
 
-        Ok(())
+        if connect_result != 0 {
+            unsafe { close(new_socket_fd) };
+
+            let last_err_i = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+
+            self.socket
+                .write_all(&Response::FailureInt(last_err_i).bytes())
+                .map_err(|err| {
+                    format!("failed to write connect error response to client - {err}")
+                })?;
+
+            return Ok(());
+        };
+
+        if let Err(err) = self.socket.write_all(&Response::Success.bytes()) {
+            unsafe { close(new_socket_fd) };
+
+            return Err(format!(
+                "connect: failed to write success response to client - {err}"
+            ))?;
+        }
+
+        let result = self.socket.send_fd(new_socket_fd);
+
+        unsafe { close(new_socket_fd) };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => Err(format!(
+                "connect: failed to send new connected socket fd to client - {err}"
+            ))?,
+        }
+    }
+}
+
+fn get_socket_info(socket_fd: c_int) -> Result<SocketInfo, GetSocketInfoError> {
+    let mut result: c_int;
+
+    let mut domain: c_int = 0;
+    let mut stype: c_int = 0;
+    let mut protocol: c_int = 0;
+
+    let mut optlen = std::mem::size_of::<c_int>() as ctypes::socklen_t;
+
+    result = unsafe {
+        getsockopt(
+            socket_fd,
+            ctypes::SOL_SOCKET,
+            ctypes::SO_DOMAIN,
+            (&raw mut domain) as *mut _,
+            &mut optlen,
+        )
+    };
+    if result != 0 {
+        return Err(GetSocketInfoError::DomainFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    let mut optlen = std::mem::size_of::<c_int>() as ctypes::socklen_t;
+
+    result = unsafe {
+        getsockopt(
+            socket_fd,
+            ctypes::SOL_SOCKET,
+            ctypes::SO_TYPE,
+            (&raw mut stype) as *mut _,
+            &mut optlen,
+        )
+    };
+    if result != 0 {
+        return Err(GetSocketInfoError::SocketTypeFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    let mut optlen = std::mem::size_of::<c_int>() as ctypes::socklen_t;
+
+    result = unsafe {
+        getsockopt(
+            socket_fd,
+            ctypes::SOL_SOCKET,
+            ctypes::SO_PROTOCOL,
+            (&raw mut protocol) as *mut _,
+            &mut optlen,
+        )
+    };
+    if result != 0 {
+        return Err(GetSocketInfoError::ProtocolFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    Ok(SocketInfo {
+        domain: domain,
+        stype: stype,
+        protocol: protocol,
+    })
+}
+
+struct SocketInfo {
+    domain: c_int,
+    stype: c_int,
+    protocol: c_int,
+}
+
+enum GetSocketInfoError {
+    DomainFailed(std::io::Error),
+    SocketTypeFailed(std::io::Error),
+    ProtocolFailed(std::io::Error),
+}
+
+impl std::fmt::Display for GetSocketInfoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::DomainFailed(err) => write!(f, "failed to get socket domain - {err}"),
+            Self::SocketTypeFailed(err) => write!(f, "failed to get socket type - {err}"),
+            Self::ProtocolFailed(err) => {
+                write!(f, "failed to get socket protocol- {err}")
+            }
+        }
     }
 }
 
 unsafe extern "C" {
     fn socket(domain: c_int, socket_type: c_int, protocol: c_int) -> c_int;
 
+    fn getsockopt(
+        sockfd: c_int,
+        level: c_int,
+        optname: c_int,
+        optval: *mut c_void,
+        optlen: *mut ctypes::socklen_t,
+    ) -> c_int;
+
     fn connect(
         socket_fd: c_int,
         name: *const ctypes::sockaddr,
         namelen: ctypes::socklen_t,
     ) -> c_int;
+
+    fn close(fd: c_int) -> c_int;
 }

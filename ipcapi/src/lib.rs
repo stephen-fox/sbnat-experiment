@@ -1,18 +1,21 @@
 use core::ffi::c_int;
 
-use std::{error::Error, io};
+use std::{
+    error::Error,
+    io,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+};
 
 const TYPE_SIZE: usize = 1;
 const C_INT_SIZE: usize = std::mem::size_of::<c_int>();
 
 pub enum Request {
-    Socket(SocketRequest),
     Connect(ConnectRequest),
 }
 
 impl Request {
     pub fn next<R: io::Read>(mut reader: R) -> Result<Self, Box<dyn Error>> {
-        let mut msg_type_raw: [u8; 1] = [0];
+        let mut msg_type_raw = [0u8; 1];
 
         reader
             .read_exact(&mut msg_type_raw)
@@ -21,115 +24,56 @@ impl Request {
         let msg_type = RequestType::from_u8(msg_type_raw[0])?;
 
         match msg_type {
-            RequestType::Socket => Ok(Self::Socket(SocketRequest::next(reader)?)),
             RequestType::Connect => Ok(Self::Connect(ConnectRequest::next(reader)?)),
         }
     }
 }
 
 pub enum RequestType {
-    Socket,
     Connect,
 }
 
 impl RequestType {
     pub fn from_u8(msg_type: u8) -> Result<Self, Box<dyn Error>> {
         match msg_type {
-            1 => Ok(RequestType::Socket),
             2 => Ok(RequestType::Connect),
             _ => Err(format!("unknown request type: {msg_type:x?}"))?,
         }
     }
 }
 
-pub struct SocketRequest {
-    pub domain: c_int,
-    pub stype: c_int,
-    pub protocol: c_int,
-}
-
-impl SocketRequest {
-    const PAYLOAD_SIZE: usize = C_INT_SIZE * 3;
-    const FULL_MSG_SIZE: usize = Self::PAYLOAD_SIZE + TYPE_SIZE;
-
-    const DOMAIN_START: usize = 0;
-    const DOMAIN_END: usize = Self::DOMAIN_START + C_INT_SIZE;
-
-    const STYPE_START: usize = Self::DOMAIN_END;
-    const STYPE_END: usize = Self::STYPE_START + C_INT_SIZE;
-
-    const PROTOCOL_START: usize = Self::STYPE_END;
-    const PROTOCOL_END: usize = Self::PROTOCOL_START + C_INT_SIZE;
-
-    pub fn next<R: io::Read>(mut reader: R) -> Result<Self, Box<dyn Error>> {
-        let mut payload = [0u8; Self::PAYLOAD_SIZE];
-
-        reader
-            .read_exact(&mut payload)
-            .map_err(|err| format!("failed to read socket request payload - {err}"))?;
-
-        let mut domain_raw = [0u8; C_INT_SIZE];
-        domain_raw.copy_from_slice(&payload[Self::DOMAIN_START..Self::DOMAIN_END]);
-
-        let mut stype_raw = [0u8; C_INT_SIZE];
-        stype_raw.copy_from_slice(&payload[Self::STYPE_START..Self::STYPE_END]);
-
-        let mut protocol_raw = [0u8; C_INT_SIZE];
-        protocol_raw.copy_from_slice(&payload[Self::PROTOCOL_START..Self::PROTOCOL_END]);
-
-        let domain = c_int::from_le_bytes(domain_raw);
-
-        if domain == ctypes::AF_UNIX {
-            return Err("AF_UNIX sockets not permitted")?;
-        }
-
-        Ok(Self {
-            domain: domain,
-            stype: c_int::from_le_bytes(stype_raw),
-            protocol: c_int::from_le_bytes(protocol_raw),
-        })
-    }
-
-    pub fn bytes(&self) -> [u8; Self::FULL_MSG_SIZE] {
-        let mut b = [0u8; Self::FULL_MSG_SIZE];
-
-        b[0] = 1;
-
-        b[Self::DOMAIN_START + TYPE_SIZE..Self::DOMAIN_END + TYPE_SIZE]
-            .copy_from_slice(&c_int::to_le_bytes(self.domain));
-
-        b[Self::STYPE_START + TYPE_SIZE..Self::STYPE_END + TYPE_SIZE]
-            .copy_from_slice(&c_int::to_le_bytes(self.stype));
-
-        b[Self::PROTOCOL_START + TYPE_SIZE..Self::PROTOCOL_END + TYPE_SIZE]
-            .copy_from_slice(&c_int::to_le_bytes(self.protocol));
-
-        b
-    }
-}
-
 pub struct ConnectRequest {
-    pub socket_fd: c_int,
-    pub name: ctypes::sockaddr,
-    pub namelen: ctypes::socklen_t,
+    pub sa: std::net::SocketAddr,
 }
 
 impl ConnectRequest {
-    const FD_SIZE: usize = std::mem::size_of::<c_int>();
-    const NAME_SIZE: usize = std::mem::size_of::<ctypes::sockaddr>();
-    const NAMELEN_SIZE: usize = std::mem::size_of::<ctypes::socklen_t>();
+    const AF_SIZE: usize = std::mem::size_of::<c_int>();
+    const PORT_SIZE: usize = std::mem::size_of::<u16>();
+    const ADDR_SIZE: usize = std::mem::size_of::<u128>();
+    const FLOWLABEL_SIZE: usize = std::mem::size_of::<u32>();
+    const SCOPEID_SIZE: usize = std::mem::size_of::<u32>();
 
-    const PAYLOAD_SIZE: usize = Self::FD_SIZE + Self::NAME_SIZE + Self::NAMELEN_SIZE;
+    const PAYLOAD_SIZE: usize = Self::AF_SIZE
+        + Self::PORT_SIZE
+        + Self::ADDR_SIZE
+        + Self::FLOWLABEL_SIZE
+        + Self::SCOPEID_SIZE;
     const FULL_MSG_SIZE: usize = Self::PAYLOAD_SIZE + TYPE_SIZE;
 
-    const FD_START: usize = 0;
-    const FD_END: usize = Self::FD_START + Self::FD_SIZE;
+    const AF_START: usize = 0;
+    const AF_END: usize = Self::AF_START + Self::AF_SIZE;
 
-    const NAME_START: usize = Self::FD_END;
-    const NAME_END: usize = Self::NAME_START + Self::NAME_SIZE;
+    const PORT_START: usize = Self::AF_END;
+    const PORT_END: usize = Self::PORT_START + Self::PORT_SIZE;
 
-    const NAMELEN_START: usize = Self::NAME_END;
-    const NAMELEN_END: usize = Self::NAMELEN_START + Self::NAMELEN_SIZE;
+    const ADDR_START: usize = Self::PORT_END;
+    const ADDR_END: usize = Self::ADDR_START + Self::ADDR_SIZE;
+
+    const FLOWLABEL_START: usize = Self::ADDR_END;
+    const FLOWLABEL_END: usize = Self::FLOWLABEL_START + Self::FLOWLABEL_SIZE;
+
+    const SCOPEID_START: usize = Self::FLOWLABEL_END;
+    const SCOPEID_END: usize = Self::SCOPEID_START + Self::SCOPEID_SIZE;
 
     pub fn next<R: io::Read>(mut reader: R) -> Result<Self, Box<dyn Error>> {
         let mut payload = [0u8; Self::PAYLOAD_SIZE];
@@ -138,20 +82,52 @@ impl ConnectRequest {
             .read_exact(&mut payload)
             .map_err(|err| format!("failed to read connect request payload - {err}"))?;
 
-        let mut fd_raw = [0; Self::FD_SIZE];
-        fd_raw.copy_from_slice(&payload[Self::FD_START..Self::FD_END]);
+        let address_family = c_int::from_le_bytes(
+            payload[Self::AF_START..Self::AF_END]
+                .try_into()
+                .map_err(|err| format!("failed to parse address family bits - {err}"))?,
+        );
 
-        let mut name_raw = [0; Self::NAME_SIZE];
-        name_raw.copy_from_slice(&payload[Self::NAME_START..Self::NAME_END]);
+        let port = u16::from_le_bytes(
+            payload[Self::PORT_START..Self::PORT_END]
+                .try_into()
+                .map_err(|err| format!("failed to parse port bits - {err}"))?,
+        );
 
-        let mut namelen_raw = [0; Self::NAMELEN_SIZE];
-        namelen_raw.copy_from_slice(&payload[Self::NAMELEN_START..Self::NAMELEN_END]);
+        let addr = u128::from_le_bytes(
+            payload[Self::ADDR_START..Self::ADDR_END]
+                .try_into()
+                .map_err(|err| format!("failed to parse addr bits - {err}"))?,
+        );
 
-        Ok(Self {
-            socket_fd: c_int::from_le_bytes(fd_raw),
-            name: ctypes::sockaddr::from_bytes(&name_raw),
-            namelen: ctypes::socklen_t::from_be_bytes(namelen_raw),
-        })
+        let socketaddr: SocketAddr = match address_family {
+            ctypes::AF_INET => {
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from_bits(addr as u32), port))
+            }
+            ctypes::AF_INET6 => {
+                let flowlabel = u32::from_le_bytes(
+                    payload[Self::FLOWLABEL_START..Self::FLOWLABEL_END]
+                        .try_into()
+                        .map_err(|err| format!("failed to parse flowlabel bits - {err}"))?,
+                );
+
+                let scopeid = u32::from_le_bytes(
+                    payload[Self::SCOPEID_START..Self::SCOPEID_END]
+                        .try_into()
+                        .map_err(|err| format!("failed to parse scope id bits - {err}"))?,
+                );
+
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from_bits(addr),
+                    port,
+                    flowlabel,
+                    scopeid,
+                ))
+            }
+            _ => return Err(format!("unsupported address family: {address_family}"))?,
+        };
+
+        Ok(Self { sa: socketaddr })
     }
 
     pub fn bytes(&self) -> [u8; Self::FULL_MSG_SIZE] {
@@ -159,14 +135,33 @@ impl ConnectRequest {
 
         b[0] = 2;
 
-        b[Self::FD_START + TYPE_SIZE..Self::FD_END + TYPE_SIZE]
-            .copy_from_slice(&c_int::to_le_bytes(self.socket_fd));
+        let mut flowlabel: u32 = 0;
+        let mut scopeid: u32 = 0;
 
-        b[Self::NAME_START + TYPE_SIZE..Self::NAME_END + TYPE_SIZE]
-            .copy_from_slice(&self.name.bytes());
+        let af_and_addr: (c_int, u128) = match self.sa {
+            SocketAddr::V4(v4) => (ctypes::AF_INET, v4.ip().to_bits() as u128),
+            SocketAddr::V6(v6) => {
+                flowlabel = v6.flowinfo();
+                scopeid = v6.scope_id();
 
-        b[Self::NAMELEN_START + TYPE_SIZE..Self::NAMELEN_END + TYPE_SIZE]
-            .copy_from_slice(&ctypes::socklen_t::to_be_bytes(self.namelen));
+                (ctypes::AF_INET6, v6.ip().to_bits())
+            }
+        };
+
+        b[Self::AF_START + TYPE_SIZE..Self::AF_END + TYPE_SIZE]
+            .copy_from_slice(&c_int::to_le_bytes(af_and_addr.0));
+
+        b[Self::PORT_START + TYPE_SIZE..Self::PORT_END + TYPE_SIZE]
+            .copy_from_slice(&u16::to_le_bytes(self.sa.port()));
+
+        b[Self::ADDR_START + TYPE_SIZE..Self::ADDR_END + TYPE_SIZE]
+            .copy_from_slice(&u128::to_le_bytes(af_and_addr.1));
+
+        b[Self::FLOWLABEL_START + TYPE_SIZE..Self::FLOWLABEL_END + TYPE_SIZE]
+            .copy_from_slice(&u32::to_le_bytes(flowlabel));
+
+        b[Self::SCOPEID_START + TYPE_SIZE..Self::SCOPEID_END + TYPE_SIZE]
+            .copy_from_slice(&u32::to_le_bytes(scopeid));
 
         b
     }
@@ -177,16 +172,6 @@ pub enum Response {
     FailureInt(c_int),
     Failure(String),
 }
-
-// pub enum ResponseType {
-//     Success,
-//     FailureInt,
-//     Failure,
-// }
-
-// impl ResponseType {
-//     pub fn from_u8
-// }
 
 impl Response {
     pub fn next<R: io::Read>(mut reader: R) -> Result<Self, Box<dyn Error>> {
