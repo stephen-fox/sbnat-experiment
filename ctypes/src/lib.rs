@@ -233,3 +233,15 @@ pub struct sockaddr_un {
 pub type sa_family_t = u8;
 
 pub type socklen_t = u32;
+
+#[repr(C)]
+pub struct addrinfo {
+    pub ai_flags: c_int,
+    pub ai_family: c_int,
+    pub ai_socktype: c_int,
+    pub ai_protocol: c_int,
+    pub ai_addrlen: socklen_t,
+    pub ai_canonname: *mut c_char,
+    pub ai_addr: *mut sockaddr,
+    pub ai_next: *mut addrinfo,
+}

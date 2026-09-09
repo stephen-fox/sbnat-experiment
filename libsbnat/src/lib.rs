@@ -1,4 +1,4 @@
-use core::ffi::c_int;
+use core::ffi::{c_char, c_int};
 
 use std::{
     error::Error,
@@ -248,6 +248,17 @@ fn do_connect_request(
 
     0
 }
+
+// TODO: Proxy calls to getaddrinfo(3) to allow name lookups.
+//
+// #[unsafe(no_mangle)]
+// extern "C" fn getaddrinfo(
+//     node: *const c_char,
+//      service: *const c_char,
+//      hints: *const ctypes::addrinfo,
+//      res: *mut *mut ctypes::addrinfo,
+// ) -> c_int {
+// }
 
 unsafe extern "C" {
     fn dup2(oldd: c_int, newd: c_int) -> c_int;
