@@ -1,22 +1,28 @@
 # sbnat (Sandbox Network Address Translation) experiment
 
-FreeBSD provides container-like functionality in the form of [jails][jails].
-When an OS process is "jailed", it can only interact with processes belonging
-to the same jail. There are some exceptions to these restrictions, like shared
-Unix sockets and networking.
+FreeBSD provides container-like sandboxing functionality in the form of
+[jails][jails]. When an operating system process is "jailed", it can only
+interact with processes belonging to the same jail. There are some exceptions
+to jail restrictions, like shared Unix sockets and networking. Networking
+makes it easy to accidentally allow jailed processes to bypass jails' strong
+process isolation features. `sbnat` is an experiment in implementing network
+isolation for jails.
+
+## Common approaches to jail networking
 
 There are several approaches to configuring networking for jails and
 they all come with trade offs between isolation and manageability.
 Here is a short, non-exhaustive summary of the common approaches:
 
 1. Host-based networking - The host's network stack (network interfaces,
-   routing tables, process network state) are shared with the jail. In
-   other words: no network namespace isolation
+   routing tables, process network state) are shared with the jail. No
+   management overhead, but provides zero network namespace isolation
 2. Interface IP restriction / interface passthrough - The jail's processes
    are restricted to using the specified IP addresses or network interfaces,
    usually requires creating a dedicated loopback interface and complex
    firewall rules. So kinda-sorta partial network namespace isolation with
-   gotchas
+   gotchas (for example: unjailed processes listening on all addresses are
+   still reachable from the jail)
 3. [VNET(9)][vnet] isolated network namespace - Creates a jail-specific
    network namespace with a dedicated loopback network interface and
    routing table. Requires another interface be passed through
@@ -28,19 +34,21 @@ Here is a short, non-exhaustive summary of the common approaches:
 [vnet]: https://man.freebsd.org/cgi/man.cgi?query=VNET&sektion=9&format=html
 [epair]: https://man.freebsd.org/cgi/man.cgi?query=epair
 
+## How sbnat works
+
 Isolating jailed processes' networking is important for both security
 reasons (e.g., to prevent sandbox escapes) and for resource conservation
 (e.g., running multiple instances of the same process that listen on
 the same TCP port for connections).
 
-I wanted to experiment with building something on top of the VNET approach
-that was easy to maintain and provided strong (but configurable) networking
-isolation. My take on this was sbnat (sandbox NAT) - a Rust-based client
-library (`libsbnat`) that proxies calls to `connect(2)` and sends the
-client's desired socket address and socket over a Unix socket to a daemon
-running outside the jail (`sbnatd`). The daemon then decides if the socket
-should be connected and returns a new socket descriptor from the global
-namespace back to the client running in the jail.
+I wanted to experiment with building something on top of VNET's strong
+networking namespacing functionality that was also easy to maintain.
+My take on this was sbnat (sandbox NAT) - a Rust-based client library
+(`libsbnat`) that proxies calls to `connect(2)` and sends the client's
+desired socket address and socket over a Unix socket to a daemon running
+outside the jail (`sbnatd`). The daemon then decides if the socket should
+be connected and returns a new socket descriptor from the global namespace
+back to the client running in the jail.
 
 Here is a visualization of that approach:
 
