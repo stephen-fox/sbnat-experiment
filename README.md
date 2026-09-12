@@ -1,34 +1,46 @@
 # sbnat (Sandbox Network Address Translation) experiment
 
-There are several approaches to configuring networking for FreeBSD jails
-and they all come with trade offs between isolation and manageability.
-Here is a short (non-exhaustive) summary of the common approaches:
+FreeBSD provides container-like functionality in the form of [jails][jails].
+When an OS process is "jailed", it can only interact with processes belonging
+to the same jail. There are some exceptions to these restrictions, like shared
+Unix sockets and networking.
 
-1. Host-based networking - The host's network interfaces and routing
-   tables are shared with the jail (no network namespace isolation)
-2. Interface passthrough - The jail's processes are restricted to
-   using the specified network interfaces, usually requires creating
-   a dedicated loopback interface and complex firewall rules (kinda
-   sorta partial network namespacing with gotchas)
-3. [VNET(9)][vnet] isolated network namespace - Creates a dedicated
-   network namespace with a jail-specific loopback interface and
+There are several approaches to configuring networking for jails and
+they all come with trade offs between isolation and manageability.
+Here is a short, non-exhaustive summary of the common approaches:
+
+1. Host-based networking - The host's network stack (network interfaces,
+   routing tables, process network state) are shared with the jail. In
+   other words: no network namespace isolation
+2. Interface IP restriction / interface passthrough - The jail's processes
+   are restricted to using the specified IP addresses or network interfaces,
+   usually requires creating a dedicated loopback interface and complex
+   firewall rules. So kinda-sorta partial network namespace isolation with
+   gotchas
+3. [VNET(9)][vnet] isolated network namespace - Creates a jail-specific
+   network namespace with a dedicated loopback network interface and
    routing table. Requires another interface be passed through
    (usually, [epair(4)][epair]) which requires bridging on the
    host side, address planning, NAT, and all the fun that comes
    with that
 
+[jails]: https://man.freebsd.org/cgi/man.cgi?query=jail&apropos=0&sektion=2
 [vnet]: https://man.freebsd.org/cgi/man.cgi?query=VNET&sektion=9&format=html
 [epair]: https://man.freebsd.org/cgi/man.cgi?query=epair
 
-I wanted to experiment with implementing a custom approach that was
-easy to maintain and provided strong (but configurable) networking
-isolation. My take on this was sbnat (sandbox NAT) - a Rust-based
-client library (`libsbnat`) that proxies calls to `connect(2)` and
-sends the client's desired socket address and socket over a Unix
-socket to a daemon running outside the jail (`sbnatd`). The daemon
-then decides if the socket should be connected and returns a new
-socket descriptor from the global namespace back to the client
-running in the jail.
+Isolating jailed processes' networking is important for both security
+reasons (e.g., to prevent sandbox escapes) and for resource conservation
+(e.g., running multiple instances of the same process that listen on
+the same TCP port for connections).
+
+I wanted to experiment with building something on top of the VNET approach
+that was easy to maintain and provided strong (but configurable) networking
+isolation. My take on this was sbnat (sandbox NAT) - a Rust-based client
+library (`libsbnat`) that proxies calls to `connect(2)` and sends the
+client's desired socket address and socket over a Unix socket to a daemon
+running outside the jail (`sbnatd`). The daemon then decides if the socket
+should be connected and returns a new socket descriptor from the global
+namespace back to the client running in the jail.
 
 Here is a visualization of that approach:
 
@@ -78,7 +90,7 @@ Here is a visualization of that approach:
 ## Usage
 
 1. In a FreeBSD VM you do not care about, create a jail with an isolated
-   network stack on top of the root file system (or setup a dedicate
+   network stack on top of the root file system (or setup a dedicated
    file system if you like):
 
 ```console
@@ -122,14 +134,17 @@ nc: connect to 185.52.176.84 port 22 (tcp) failed: Network is unreachable
    Unix socket path:
 
 ```console
-root@testsbnat:/ # SBNAT_SOCKET_PATH=/tmp/sbnat.sock LD_PRELOAD=/path/to/sbnat/target/debug/liblibsbnat.so nc 185.52.176.84 22
+root@testsbnat:/ # export SBNAT_SOCKET_PATH=/tmp/sbnat.sock
+root@testsbnat:/ # LD_PRELOAD=/path/to/sbnat/target/debug/liblibsbnat.so
+root@testsbnat:/ # nc 185.52.176.84 22
 SSH-2.0-OpenSSH_10.3
 ```
 
 
 6. From outside the jail, we can see the `nc` process has connected
-   to the SSH server we specified above (note, do not ask why there
-   are two file descriptors - I messed something up -_-):
+   to the SSH server we specified above (note, there are two file
+   descriptors because the client uses `dup2(2)` to replace the
+   original which also creates a second file descriptor):
 
 ```console
 # sockstat
