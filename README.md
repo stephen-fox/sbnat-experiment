@@ -143,11 +143,10 @@ nc: connect to 185.52.176.84 port 22 (tcp) failed: Network is unreachable
 
 ```console
 root@testsbnat:/ # export SBNAT_SOCKET_PATH=/tmp/sbnat.sock
-root@testsbnat:/ # LD_PRELOAD=/path/to/sbnat/target/debug/liblibsbnat.so
+root@testsbnat:/ # export LD_PRELOAD=/path/to/sbnat/target/debug/liblibsbnat.so
 root@testsbnat:/ # nc 185.52.176.84 22
 SSH-2.0-OpenSSH_10.3
 ```
-
 
 6. From outside the jail, we can see the `nc` process has connected
    to the SSH server we specified above (note, there are two file
